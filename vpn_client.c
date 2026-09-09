@@ -3,6 +3,7 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,31 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+static int g_tun_fd = -1;
+static int g_udp_fd = -1;
+static char g_tun_name[IFNAMSIZ] = {0};
+
+void handle_sigint(int sig) {
+  (void)sig;
+  printf("\n[CLIENT] Zatvaram TUN sucelje i UDP soket...\n");
+  if (g_tun_name[0] != '\0') {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "ip link set %s down", g_tun_name);
+    system(cmd);
+    printf("[CLIENT] %s iskljuceno.\n", g_tun_name);
+  }
+
+  if (g_tun_fd >= 0)
+    close(g_tun_fd);
+
+  if (g_udp_fd >= 0)
+    close(g_udp_fd);
+
+  printf("[CLIENT] Zatvaranje dovrseno. Izlazim...\n");
+  fflush(stdout);
+  exit(0);
+}
 
 int tun_alloc(char *dev) {
   struct ifreq ifr;
@@ -38,9 +64,12 @@ int tun_alloc(char *dev) {
 }
 
 int main(int argc, char *argv[]) {
+  signal(SIGINT, handle_sigint);
   char tun_name[IFNAMSIZ] = "tun1";
   char client_ip[32] = "10.0.0.2";
   char buffer[2000];
+
+  strncpy(g_tun_name, tun_name, sizeof(g_tun_name) - 1);
 
   if (argc > 1) {
     strncpy(tun_name, argv[1], IFNAMSIZ - 1);
@@ -66,6 +95,7 @@ int main(int argc, char *argv[]) {
     perror("Greska pri kreiranju TUN sucelja");
     return 1;
   }
+  g_tun_fd = tun_fd;
 
   char cmd[256];
   snprintf(cmd, sizeof(cmd), "ip addr add %s/24 dev %s", client_ip, tun_name);
@@ -82,6 +112,7 @@ int main(int argc, char *argv[]) {
     close(tun_fd);
     exit(1);
   }
+  g_udp_fd = udp_fd;
 
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));

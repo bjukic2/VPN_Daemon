@@ -93,6 +93,28 @@ vpn_peer_t *find_client_by_vpn_ip(uint32_t vpn_ip) {
   return NULL;
 }
 
+void cleanup_inactive_clients() {
+  time_t now = time(NULL);
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].active && (now - clients[i].last_active > CLIENT_TIMEOUT)) {
+      char real_ip_str[INET_ADDRSTRLEN];
+      char vpn_ip_str[INET_ADDRSTRLEN];
+
+      inet_ntop(AF_INET, &clients[i].real_addr.sin_addr, real_ip_str,
+                sizeof(real_ip_str));
+      inet_ntop(AF_INET, &clients[i].vpn_ip, vpn_ip_str, sizeof(vpn_ip_str));
+      printf("[SERVER] Klijent isključen zbog neaktivnosti: %s:%d -> VPN IP: "
+             "%s\n",
+             real_ip_str, ntohs(clients[i].real_addr.sin_port), vpn_ip_str);
+      fflush(stdout);
+
+      clients[i].active = 0;
+      clients[i].vpn_ip = 0;
+      memset(&clients[i].real_addr, 0, sizeof(clients[i].real_addr));
+    }
+  }
+}
+
 int main() {
   if (sodium_init() < 0) {
     perror("Greska pri inicijalizaciji libsodiuma");
@@ -149,6 +171,22 @@ int main() {
     int max_fd = (tun_fd > udp_fd) ? tun_fd : udp_fd;
 
     select(max_fd + 1, &rd_set, NULL, NULL, NULL);
+
+    struct timeval timeout;
+    timeout.tv_sec = 5; // Check every 5 seconds
+    timeout.tv_usec = 0;
+
+    int ret = select(max_fd + 1, &rd_set, NULL, NULL, &timeout);
+    if (ret < 0) {
+      perror("Greska pri selectu");
+      break;
+    }
+
+    cleanup_inactive_clients();
+
+    if (ret == 0) {
+      continue; // Timeout occurred, go back to select
+    }
 
     if (FD_ISSET(udp_fd, &rd_set)) {
       struct sockaddr_in sender_addr;
