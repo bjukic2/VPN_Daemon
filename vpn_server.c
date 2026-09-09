@@ -88,6 +88,8 @@ int main() {
     FD_SET(tun_fd, &rd_set);
     FD_SET(udp_fd, &rd_set);
 
+    int max_fd = (tun_fd > udp_fd) ? tun_fd : udp_fd;
+
     select(max_fd + 1, &rd_set, NULL, NULL, NULL);
 
     if (FD_ISSET(udp_fd, &rd_set)) {
@@ -116,11 +118,13 @@ int main() {
           printf("[UPOZORENJE] Uhvacen neispravan ili modificiran paket! "
                  "Odbacujem...\n");
         } else {
+          client_connected = 1;
           // Paket je legitiman, gurni ga u virtualnu mrezu
           write(tun_fd, decrypted, original_len);
           printf("[SERVER -> KLIJENT] Dekriptiran paket (%d bajtova) gurnut u "
                  "TUN\n",
                  original_len);
+          fflush(stdout);
         }
       }
     }
@@ -152,6 +156,7 @@ int main() {
         if (sent > 0) {
           printf("[SERVER -> KLIJENT] Poslan kriptirani paket (%d bajtova)\n",
                  sent);
+          fflush(stdout);
         }
       }
     }
