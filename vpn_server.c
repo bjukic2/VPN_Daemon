@@ -3,14 +3,29 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <sodium.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+#define MAX_CLIENTS 16
+#define CLIENT_TIMEOUT 60 // seconds
+
+typedef struct {
+  uint32_t vpn_ip;
+  struct sockaddr_in real_addr;
+  time_t last_active;
+  int active;
+} vpn_peer_t;
+
+vpn_peer_t clients[MAX_CLIENTS];
 
 int tun_alloc(char *dev) {
   struct ifreq ifr;
@@ -35,6 +50,45 @@ int tun_alloc(char *dev) {
 
   strcpy(dev, ifr.ifr_name);
   return fd;
+}
+
+void update_client(uint32_t vpn_ip, struct sockaddr_in *real_addr) {
+  time_t now = time(NULL);
+  int free_slot = -1;
+
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].active && clients[i].vpn_ip == vpn_ip) {
+      clients[i].real_addr = *real_addr;
+      clients[i].last_active = now;
+      return;
+    }
+    if (!clients[i].active && free_slot == -1) {
+      free_slot = i;
+    }
+  }
+
+  if (free_slot != -1) {
+    clients[free_slot].vpn_ip = vpn_ip;
+    clients[free_slot].real_addr = *real_addr;
+    clients[free_slot].last_active = now;
+    clients[free_slot].active = 1;
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &real_addr->sin_addr, ip_str, sizeof(ip_str));
+    printf("[SERVER] Novi klijent dodan: %s:%d -> VPN IP: %u.%u.%u.%u\n",
+           ip_str, ntohs(real_addr->sin_port), (vpn_ip >> 24) & 0xFF,
+           (vpn_ip >> 16) & 0xFF, (vpn_ip >> 8) & 0xFF, vpn_ip & 0xFF);
+    fflush(stdout);
+  }
+}
+
+vpn_peer_t *find_client_by_vpn_ip(uint32_t vpn_ip) {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].active && clients[i].vpn_ip == vpn_ip) {
+      return &clients[i];
+    }
+  }
+  return NULL;
 }
 
 int main() {
@@ -76,6 +130,8 @@ int main() {
     return -1;
   }
 
+  memset(clients, 0, sizeof(clients));
+
   printf("[SERVER] Slusam na UDP portu 55555...\n");
 
   int max_fd = (tun_fd > udp_fd) ? tun_fd : udp_fd;
@@ -93,8 +149,10 @@ int main() {
     select(max_fd + 1, &rd_set, NULL, NULL, NULL);
 
     if (FD_ISSET(udp_fd, &rd_set)) {
+      struct sockaddr_in sender_addr;
+      socklen_t sender_len = sizeof(sender_addr);
       int nread = recvfrom(udp_fd, buffer, sizeof(buffer), 0,
-                           (struct sockaddr *)&client_addr, &client_len);
+                           (struct sockaddr *)&sender_addr, &sender_len);
 
       // Minimalna velicina paketa mora biti Nonce + MAC
       if (nread > (crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES)) {
@@ -118,50 +176,59 @@ int main() {
           printf("[UPOZORENJE] Uhvacen neispravan ili modificiran paket! "
                  "Odbacujem...\n");
         } else {
-          client_connected = 1;
-          // Paket je legitiman, gurni ga u virtualnu mrezu
-          write(tun_fd, decrypted, original_len);
-          printf("[SERVER -> KLIJENT] Dekriptiran paket (%d bajtova) gurnut u "
-                 "TUN\n",
-                 original_len);
-          fflush(stdout);
+          if (original_len >= sizeof(struct iphdr)) {
+            struct iphdr *ip_header = (struct iphdr *)decrypted;
+
+            uint32_t vpn_ip = ip_header->saddr;
+            update_client(vpn_ip, &sender_addr);
+
+            write(tun_fd, decrypted, original_len);
+            printf("[SERVER] Dekriptiran paket (%d bajtova) gurnut u TUN\n",
+                   original_len);
+            fflush(stdout);
+          }
         }
       }
     }
 
     if (FD_ISSET(tun_fd, &rd_set)) {
       int nread = read(tun_fd, buffer, sizeof(buffer));
-      if (nread > 0 && client_connected) {
-        // 1. Generiramo nasumicni Nonce za ovaj paket
-        unsigned char nonce[crypto_secretbox_NONCEBYTES];
-        randombytes_buf(nonce, sizeof(nonce));
 
-        // 2. Alociramo memoriju za kriptirani dio (original + MAC)
-        unsigned char ciphertext[nread + crypto_secretbox_MACBYTES];
+      if (nread <= 0) {
+        perror("Greska pri citanju iz TUN sucelja");
+        break;
+      }
 
-        // 3. Kriptiramo podatke (buffer -> ciphertext)
-        crypto_secretbox_easy(ciphertext, (unsigned char *)buffer, nread, nonce,
-                              shared_key);
+      if (nread >= sizeof(struct iphdr)) {
+        struct iphdr *iph = (struct iphdr *)buffer;
 
-        // 4. Slazemo finalni paket: [ NONCE | CIPHERTEXT ]
-        int final_len = sizeof(nonce) + sizeof(ciphertext);
-        unsigned char final_packet[final_len];
+        // Tražimo klijenta prema odredišnom IP-u (daddr)
+        vpn_peer_t *peer = find_client_by_vpn_ip(iph->daddr);
 
-        memcpy(final_packet, nonce, sizeof(nonce));
-        memcpy(final_packet + sizeof(nonce), ciphertext, sizeof(ciphertext));
+        if (peer != NULL) {
+          unsigned char nonce[crypto_secretbox_NONCEBYTES];
+          randombytes_buf(nonce, sizeof(nonce));
 
-        // 5. Šaljemo kriptirani UDP paket
-        int sent = sendto(udp_fd, final_packet, final_len, 0,
-                          (struct sockaddr *)&client_addr, client_len);
-        if (sent > 0) {
+          unsigned char ciphertext[nread + crypto_secretbox_MACBYTES];
+          crypto_secretbox_easy(ciphertext, (unsigned char *)buffer, nread,
+                                nonce, shared_key);
+
+          int final_len = sizeof(nonce) + sizeof(ciphertext);
+          unsigned char final_packet[final_len];
+
+          memcpy(final_packet, nonce, sizeof(nonce));
+          memcpy(final_packet + sizeof(nonce), ciphertext, sizeof(ciphertext));
+
+          sendto(udp_fd, final_packet, final_len, 0,
+                 (struct sockaddr *)&peer->real_addr, sizeof(peer->real_addr));
+
           printf("[SERVER -> KLIJENT] Poslan kriptirani paket (%d bajtova)\n",
-                 sent);
+                 final_len);
           fflush(stdout);
         }
       }
     }
   }
-
   close(tun_fd);
   close(udp_fd);
   return 0;
