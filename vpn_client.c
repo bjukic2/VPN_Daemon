@@ -54,12 +54,14 @@ int main() {
 
   int tun_fd = tun_alloc(tun_name);
   if (tun_fd < 0) {
-    exit(1);
+    perror("Greska pri kreiranju TUN sucelja");
+    return 1;
   }
 
   system("ip addr add 10.0.0.2/24 dev tun1");
+  system("ip link set tun1 mtu 1400");
   system("ip link set tun1 up");
-  printf("[CLIENT] tun1 kreiran (10.0.0.2).\n");
+  printf("[CLIENT] tun1 kreiran (10.0.0.2) s MTU 1400.\n");
 
   int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (udp_fd < 0) {

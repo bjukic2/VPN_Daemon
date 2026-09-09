@@ -49,12 +49,17 @@ int main() {
       0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
 
   char tun_name[IFNAMSIZ] = "tun0";
-  char buffer[1500]; // Maksimalna velicina paketa za TUN sucelje
+  char buffer[2000];
 
   int tun_fd = tun_alloc(tun_name);
+  if (tun_fd < 0) {
+    perror("Greska pri kreiranju TUN sucelja");
+    return 1;
+  }
   system("ip addr add 10.0.0.1/24 dev tun0");
+  system("ip link set tun0 mtu 1400");
   system("ip link set tun0 up");
-  printf("[SERVER] tun0 kreirano (10.0.0.1).\n");
+  printf("[SERVER] tun0 kreirano (10.0.0.1) s MTU 1400.\n");
 
   int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
   struct sockaddr_in client_addr, server_addr;
