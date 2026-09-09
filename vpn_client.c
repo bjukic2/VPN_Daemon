@@ -74,9 +74,9 @@ int main() {
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(55555);
-  inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
+  inet_pton(AF_INET, "192.168.1.212", &server_addr.sin_addr);
 
-  printf("[CLIENT] Tunel usmjeren prema 127.0.0.1:55555\n");
+  printf("[CLIENT] Tunel usmjeren prema 192.168.1.212:55555\n");
 
   int max_fd = (tun_fd > udp_fd) ? tun_fd : udp_fd;
 
