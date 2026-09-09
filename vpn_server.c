@@ -73,11 +73,13 @@ void update_client(uint32_t vpn_ip, struct sockaddr_in *real_addr) {
     clients[free_slot].last_active = now;
     clients[free_slot].active = 1;
 
-    char ip_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &real_addr->sin_addr, ip_str, sizeof(ip_str));
-    printf("[SERVER] Novi klijent dodan: %s:%d -> VPN IP: %u.%u.%u.%u\n",
-           ip_str, ntohs(real_addr->sin_port), (vpn_ip >> 24) & 0xFF,
-           (vpn_ip >> 16) & 0xFF, (vpn_ip >> 8) & 0xFF, vpn_ip & 0xFF);
+    char real_ip_str[INET_ADDRSTRLEN];
+    char vpn_ip_str[INET_ADDRSTRLEN];
+
+    inet_ntop(AF_INET, &real_addr->sin_addr, real_ip_str, sizeof(real_ip_str));
+    inet_ntop(AF_INET, &vpn_ip, vpn_ip_str, sizeof(vpn_ip_str));
+    printf("[SERVER] Novi klijent dodan: %s:%d -> VPN IP: %s\n", real_ip_str,
+           ntohs(real_addr->sin_port), vpn_ip_str);
     fflush(stdout);
   }
 }
