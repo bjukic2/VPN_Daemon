@@ -37,10 +37,22 @@ int tun_alloc(char *dev) {
   return fd;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+  char tun_name[IFNAMSIZ] = "tun1";
+  char client_ip[32] = "10.0.0.2";
+  char buffer[2000];
+
+  if (argc > 1) {
+    strncpy(tun_name, argv[1], IFNAMSIZ - 1);
+    tun_name[IFNAMSIZ - 1] = '\0';
+  }
+  if (argc > 2) {
+    strncpy(client_ip, argv[2], sizeof(client_ip) - 1);
+    client_ip[sizeof(client_ip) - 1] = '\0';
+  }
 
   if (sodium_init() < 0) {
-    fprintf(stderr, "Greska pri inicijalizaciji libsodium\n");
+    fprintf(stderr, "Greška pri inicijalizaciji Libsodiuma!");
     return -1;
   }
 
@@ -49,19 +61,20 @@ int main() {
       0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
       0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
 
-  char tun_name[IFNAMSIZ] = "tun1";
-  char buffer[2000];
-
   int tun_fd = tun_alloc(tun_name);
   if (tun_fd < 0) {
     perror("Greska pri kreiranju TUN sucelja");
     return 1;
   }
 
-  system("ip addr add 10.0.0.2/24 dev tun1");
-  system("ip link set tun1 mtu 1400");
-  system("ip link set tun1 up");
-  printf("[CLIENT] tun1 kreiran (10.0.0.2) s MTU 1400.\n");
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "ip addr add %s/24 dev %s", client_ip, tun_name);
+  system(cmd);
+  snprintf(cmd, sizeof(cmd), "ip link set %s mtu 1400 up", tun_name);
+  system(cmd);
+
+  printf("[CLIENT] sucelje %s VPN IP: %s\n", tun_name, client_ip);
+  fflush(stdout);
 
   int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (udp_fd < 0) {
@@ -115,6 +128,7 @@ int main() {
         if (sent > 0) {
           printf("[KLIJENT -> SERVER] Poslan kriptirani paket (%d bajtova)\n",
                  sent);
+          fflush(stdout);
         }
       }
     }
@@ -152,6 +166,7 @@ int main() {
           printf("[SERVER -> KLIJENT] Dekriptiran paket (%d bajtova) gurnut u "
                  "TUN\n",
                  original_len);
+          fflush(stdout);
         }
       }
     }
