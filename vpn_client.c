@@ -13,19 +13,40 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define SERVER_IP "130.61.60.21"
+
 static int g_tun_fd = -1;
 static int g_udp_fd = -1;
 static char g_tun_name[IFNAMSIZ] = {0};
 
 void handle_sigint(int sig) {
   (void)sig;
-  printf("\n[CLIENT] Zatvaram TUN sucelje i UDP soket...\n");
+  printf("\n[CLIENT] Vracam mrezne postavke i gasim VPN...\n");
+
+  // --- NOVO: CISCENJE RUTA I VRACANJE MREZE PRI PREKIDU (Ctrl+C) ---
   if (g_tun_name[0] != '\0') {
     char cmd[256];
+
+    // 1. Ukloni VPN rute
+    snprintf(cmd, sizeof(cmd), "ip route del 0.0.0.0/1 dev %s 2>/dev/null",
+             g_tun_name);
+    system(cmd);
+    snprintf(cmd, sizeof(cmd), "ip route del 128.0.0.0/1 dev %s 2>/dev/null",
+             g_tun_name);
+    system(cmd);
+
+    // 2. Ukloni staticku rutu do Oraclea
+    snprintf(cmd, sizeof(cmd), "ip route del %s 2>/dev/null", SERVER_IP);
+    system(cmd);
+
+    // 3. Spusti sucelje
     snprintf(cmd, sizeof(cmd), "ip link set %s down", g_tun_name);
     system(cmd);
-    printf("[CLIENT] %s iskljuceno.\n", g_tun_name);
+    printf("[CLIENT] %s iskljuceno i rute obrisane.\n", g_tun_name);
   }
+
+  // Ukloni blokadu
+  system("ip -6 route del unreachable default metric 1 2>/dev/null");
 
   if (g_tun_fd >= 0)
     close(g_tun_fd);
@@ -126,6 +147,25 @@ int main(int argc, char *argv[]) {
   printf("[CLIENT] sucelje %s VPN IP: %s\n", tun_name, client_ip);
   fflush(stdout);
 
+  // --- NOVO: DODAVANJE RUTA I GASENJE IPV6 ODMAH NAKON PODIZANJA TUN-a ---
+  // Umjesto sysctl-a: blokiraj sav IPv6 promet dok radi VPN (nema curenja)
+  system("ip -6 route add unreachable default metric 1 2>/dev/null");
+
+  // 2. Statička ruta do Oraclea preko kućnog rutera (da tunel ne pukne sam u
+  // sebe)
+  snprintf(cmd, sizeof(cmd),
+           "ip route add %s via 192.168.1.1 dev wlan0 2>/dev/null", SERVER_IP);
+  system(cmd);
+
+  // 3. Preusmjeri sav internet promet kroz tun1
+  snprintf(cmd, sizeof(cmd), "ip route replace 0.0.0.0/1 dev %s", tun_name);
+  system(cmd);
+  snprintf(cmd, sizeof(cmd), "ip route replace 128.0.0.0/1 dev %s", tun_name);
+  system(cmd);
+  printf("[CLIENT] Rute postavljene: sav promet ide kroz %s\n", tun_name);
+  fflush(stdout);
+  // ----------------------------------------------------------------------
+
   int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (udp_fd < 0) {
     perror("Greska pri kreiranju UDP soketa");
@@ -138,9 +178,9 @@ int main(int argc, char *argv[]) {
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(55555);
-  inet_pton(AF_INET, "192.168.1.212", &server_addr.sin_addr);
+  inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
 
-  printf("[CLIENT] Tunel usmjeren prema 192.168.1.212:55555\n");
+  printf("[CLIENT] Tunel usmjeren prema %s:55555\n", SERVER_IP);
 
   int max_fd = (tun_fd > udp_fd) ? tun_fd : udp_fd;
 
@@ -155,25 +195,19 @@ int main(int argc, char *argv[]) {
     if (FD_ISSET(tun_fd, &rd_set)) {
       int nread = read(tun_fd, buffer, sizeof(buffer));
       if (nread > 0) {
-        // 1. Generiramo nasumicni Nonce za ovaj paket
         unsigned char nonce[crypto_secretbox_NONCEBYTES];
         randombytes_buf(nonce, sizeof(nonce));
 
-        // 2. Alociramo memoriju za kriptirani dio (original + MAC)
         unsigned char ciphertext[nread + crypto_secretbox_MACBYTES];
-
-        // 3. Kriptiramo podatke (buffer -> ciphertext)
         crypto_secretbox_easy(ciphertext, (unsigned char *)buffer, nread, nonce,
                               client_tx);
 
-        // 4. Slazemo finalni paket: [ NONCE | CIPHERTEXT ]
         int final_len = sizeof(nonce) + sizeof(ciphertext);
         unsigned char final_packet[final_len];
 
         memcpy(final_packet, nonce, sizeof(nonce));
         memcpy(final_packet + sizeof(nonce), ciphertext, sizeof(ciphertext));
 
-        // 5. Šaljemo kriptirani UDP paket
         int sent = sendto(udp_fd, final_packet, final_len, 0,
                           (struct sockaddr *)&server_addr, sizeof(server_addr));
         if (sent > 0) {
@@ -190,29 +224,22 @@ int main(int argc, char *argv[]) {
       int nread = recvfrom(udp_fd, buffer, sizeof(buffer), 0,
                            (struct sockaddr *)&from_addr, &from_len);
 
-      // Minimalna velicina paketa mora biti Nonce + MAC
       if (nread > (crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES)) {
-
-        // 1. Izdvajamo Nonce iz primljenog paketa
         unsigned char nonce[crypto_secretbox_NONCEBYTES];
         memcpy(nonce, buffer, sizeof(nonce));
 
-        // 2. Izračunavamo veličinu kriptiranog dijela i originala
         int cipher_len = nread - crypto_secretbox_NONCEBYTES;
         int original_len = cipher_len - crypto_secretbox_MACBYTES;
 
         unsigned char decrypted[original_len];
 
-        // 3. Pokušavamo dekriptirati i provjeriti autenticnost paketa!
         if (crypto_secretbox_open_easy(
                 decrypted,
                 (unsigned char *)(buffer + crypto_secretbox_NONCEBYTES),
                 cipher_len, nonce, client_rx) != 0) {
-          // Netko je presreo i pokusao promijeniti paket!
           printf("[UPOZORENJE] Uhvacen neispravan ili modificiran paket! "
                  "Odbacujem...\n");
         } else {
-          // Paket je legitiman, gurni ga u virtualnu mrezu
           write(tun_fd, decrypted, original_len);
           printf("[SERVER -> KLIJENT] Dekriptiran paket (%d bajtova) gurnut u "
                  "TUN\n",
