@@ -64,6 +64,31 @@ int tun_alloc(char *dev) {
 }
 
 int main(int argc, char *argv[]) {
+  // Client's static key pair (generated using keygen.c)
+  unsigned char client_pk[crypto_kx_PUBLICKEYBYTES] = {
+      0xB9, 0x0E, 0xAF, 0xEC, 0x57, 0x34, 0x88, 0xED, 0x77, 0xAC, 0x69,
+      0x1E, 0xE9, 0x88, 0xBA, 0x40, 0xE0, 0x60, 0xD5, 0x92, 0xD9, 0x09,
+      0xF0, 0x60, 0xC1, 0x2C, 0x27, 0xAF, 0x06, 0x10, 0x50, 0x39};
+  unsigned char client_sk[crypto_kx_SECRETKEYBYTES] = {
+      0x3F, 0xDB, 0x8D, 0x2B, 0x51, 0x13, 0xFE, 0x48, 0x6E, 0x47, 0xA1,
+      0xE8, 0x06, 0x52, 0x41, 0xAD, 0x5D, 0xBB, 0x71, 0xF4, 0x42, 0xEF,
+      0x2A, 0xF1, 0xFC, 0xA7, 0x81, 0xD7, 0xA9, 0x9A, 0xAB, 0x2A};
+
+  // Server's static public key (generated using keygen.c)
+  unsigned char server_pk[crypto_kx_PUBLICKEYBYTES] = {
+      0x8B, 0xA4, 0x70, 0x61, 0xA7, 0x15, 0xDA, 0x3F, 0x36, 0xE5, 0x2D,
+      0x31, 0xF0, 0xEB, 0x8E, 0x39, 0x94, 0xBD, 0x88, 0xB5, 0xA4, 0x01,
+      0x0F, 0xAC, 0xAD, 0x51, 0x39, 0x84, 0xF7, 0xFB, 0x61, 0x56};
+
+  unsigned char client_rx[crypto_kx_SESSIONKEYBYTES];
+  unsigned char client_tx[crypto_kx_SESSIONKEYBYTES];
+
+  if (crypto_kx_client_session_keys(client_rx, client_tx, client_pk, client_sk,
+                                    server_pk) != 0) {
+    fprintf(stderr, "Greska pri generiranju sesijskih kljuceva!\n");
+    return -1;
+  }
+
   signal(SIGINT, handle_sigint);
   char tun_name[IFNAMSIZ] = "tun1";
   char client_ip[32] = "10.0.0.2";
@@ -84,11 +109,6 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Greška pri inicijalizaciji Libsodiuma!");
     return -1;
   }
-
-  unsigned char shared_key[crypto_secretbox_KEYBYTES] = {
-      0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
-      0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
-      0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
 
   int tun_fd = tun_alloc(tun_name);
   if (tun_fd < 0) {
@@ -144,7 +164,7 @@ int main(int argc, char *argv[]) {
 
         // 3. Kriptiramo podatke (buffer -> ciphertext)
         crypto_secretbox_easy(ciphertext, (unsigned char *)buffer, nread, nonce,
-                              shared_key);
+                              client_tx);
 
         // 4. Slazemo finalni paket: [ NONCE | CIPHERTEXT ]
         int final_len = sizeof(nonce) + sizeof(ciphertext);
@@ -187,7 +207,7 @@ int main(int argc, char *argv[]) {
         if (crypto_secretbox_open_easy(
                 decrypted,
                 (unsigned char *)(buffer + crypto_secretbox_NONCEBYTES),
-                cipher_len, nonce, shared_key) != 0) {
+                cipher_len, nonce, client_rx) != 0) {
           // Netko je presreo i pokusao promijeniti paket!
           printf("[UPOZORENJE] Uhvacen neispravan ili modificiran paket! "
                  "Odbacujem...\n");

@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sodium.h>
+#include <sodium/crypto_kx.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,9 @@ typedef struct {
   struct sockaddr_in real_addr;
   time_t last_active;
   int active;
+
+  unsigned char tx[crypto_kx_SESSIONKEYBYTES]; // TX key
+  unsigned char rx[crypto_kx_SESSIONKEYBYTES]; // RX key
 } vpn_peer_t;
 
 vpn_peer_t clients[MAX_CLIENTS];
@@ -52,7 +56,10 @@ int tun_alloc(char *dev) {
   return fd;
 }
 
-void update_client(uint32_t vpn_ip, struct sockaddr_in *real_addr) {
+void update_client(uint32_t vpn_ip, struct sockaddr_in *real_addr,
+                   const unsigned char *client_pk,
+                   const unsigned char *server_pk,
+                   const unsigned char *server_sk) {
   time_t now = time(NULL);
   int free_slot = -1;
 
@@ -73,6 +80,14 @@ void update_client(uint32_t vpn_ip, struct sockaddr_in *real_addr) {
     clients[free_slot].last_active = now;
     clients[free_slot].active = 1;
 
+    if (crypto_kx_server_session_keys(clients[free_slot].rx,
+                                      clients[free_slot].tx, server_pk,
+                                      server_sk, client_pk) != 0) {
+      fprintf(stderr, "Greska pri generiranju sesijskih kljuceva!\n");
+      clients[free_slot].active = 0;
+      return;
+    }
+
     char real_ip_str[INET_ADDRSTRLEN];
     char vpn_ip_str[INET_ADDRSTRLEN];
 
@@ -87,6 +102,17 @@ void update_client(uint32_t vpn_ip, struct sockaddr_in *real_addr) {
 vpn_peer_t *find_client_by_vpn_ip(uint32_t vpn_ip) {
   for (int i = 0; i < MAX_CLIENTS; i++) {
     if (clients[i].active && clients[i].vpn_ip == vpn_ip) {
+      return &clients[i];
+    }
+  }
+  return NULL;
+}
+
+vpn_peer_t *find_client_by_real_addr(struct sockaddr_in *real_addr) {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].active &&
+        clients[i].real_addr.sin_addr.s_addr == real_addr->sin_addr.s_addr &&
+        clients[i].real_addr.sin_port == real_addr->sin_port) {
       return &clients[i];
     }
   }
@@ -116,15 +142,27 @@ void cleanup_inactive_clients() {
 }
 
 int main() {
+  // Server's static key pair (for demonstration purposes)
+  unsigned char server_pk[crypto_kx_PUBLICKEYBYTES] = {
+      0x8B, 0xA4, 0x70, 0x61, 0xA7, 0x15, 0xDA, 0x3F, 0x36, 0xE5, 0x2D,
+      0x31, 0xF0, 0xEB, 0x8E, 0x39, 0x94, 0xBD, 0x88, 0xB5, 0xA4, 0x01,
+      0x0F, 0xAC, 0xAD, 0x51, 0x39, 0x84, 0xF7, 0xFB, 0x61, 0x56};
+
+  unsigned char server_sk[crypto_kx_SECRETKEYBYTES] = {
+      0xDE, 0x6D, 0xAC, 0xED, 0x7C, 0xC0, 0x7A, 0x0B, 0x45, 0xFA, 0x89,
+      0xAB, 0x6D, 0xDC, 0x5A, 0xC5, 0xBD, 0xC5, 0xCB, 0xF4, 0xD0, 0x1B,
+      0xA5, 0xD9, 0x06, 0x0D, 0x07, 0x3C, 0xFA, 0x1D, 0x2C, 0x1B};
+
+  // Client's static public key (for demonstration purposes)
+  unsigned char client_pk[crypto_kx_PUBLICKEYBYTES] = {
+      0xB9, 0x0E, 0xAF, 0xEC, 0x57, 0x34, 0x88, 0xED, 0x77, 0xAC, 0x69,
+      0x1E, 0xE9, 0x88, 0xBA, 0x40, 0xE0, 0x60, 0xD5, 0x92, 0xD9, 0x09,
+      0xF0, 0x60, 0xC1, 0x2C, 0x27, 0xAF, 0x06, 0x10, 0x50, 0x39};
+
   if (sodium_init() < 0) {
     perror("Greska pri inicijalizaciji libsodiuma");
     return 1;
   }
-
-  unsigned char shared_key[crypto_secretbox_KEYBYTES] = {
-      0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
-      0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
-      0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
 
   char tun_name[IFNAMSIZ] = "tun0";
   char buffer[2000];
@@ -162,6 +200,15 @@ int main() {
   socklen_t client_len = sizeof(client_addr);
   int client_connected = 0;
 
+  static unsigned char default_rx[crypto_kx_SESSIONKEYBYTES];
+  static unsigned char default_tx[crypto_kx_SESSIONKEYBYTES];
+
+  if (crypto_kx_server_session_keys(default_rx, default_tx, server_pk,
+                                    server_sk, client_pk) != 0) {
+    fprintf(stderr, "Greska pri generiranju sesijskih kljuceva!\n");
+    return -1;
+  }
+
   while (1) {
     fd_set rd_set;
     FD_ZERO(&rd_set);
@@ -169,8 +216,6 @@ int main() {
     FD_SET(udp_fd, &rd_set);
 
     int max_fd = (tun_fd > udp_fd) ? tun_fd : udp_fd;
-
-    select(max_fd + 1, &rd_set, NULL, NULL, NULL);
 
     struct timeval timeout;
     timeout.tv_sec = 5; // Check every 5 seconds
@@ -207,20 +252,37 @@ int main() {
 
         unsigned char decrypted[original_len];
 
+        vpn_peer_t *client = find_client_by_real_addr(&sender_addr);
+        int decryption_success = 0;
+
+        if (client != NULL) {
+          // 3. Pokušavamo dekriptirati i provjeriti autenticnost paketa!
+          if (crypto_secretbox_open_easy(
+                  decrypted,
+                  (unsigned char *)(buffer + crypto_secretbox_NONCEBYTES),
+                  cipher_len, nonce, client->rx) == 0) {
+            decryption_success = 1;
+          }
+        } else {
+          if (crypto_secretbox_open_easy(
+                  decrypted,
+                  (unsigned char *)(buffer + crypto_secretbox_NONCEBYTES),
+                  cipher_len, nonce, default_rx) == 0) {
+            decryption_success = 1;
+          }
+        }
         // 3. Pokušavamo dekriptirati i provjeriti autenticnost paketa!
-        if (crypto_secretbox_open_easy(
-                decrypted,
-                (unsigned char *)(buffer + crypto_secretbox_NONCEBYTES),
-                cipher_len, nonce, shared_key) != 0) {
-          // Netko je presreo i pokusao promijeniti paket!
+        if (!decryption_success) {
           printf("[UPOZORENJE] Uhvacen neispravan ili modificiran paket! "
                  "Odbacujem...\n");
+          continue;
         } else {
           if (original_len >= sizeof(struct iphdr)) {
             struct iphdr *ip_header = (struct iphdr *)decrypted;
 
             uint32_t vpn_ip = ip_header->saddr;
-            update_client(vpn_ip, &sender_addr);
+            update_client(vpn_ip, &sender_addr, client_pk, server_pk,
+                          server_sk);
 
             write(tun_fd, decrypted, original_len);
             printf("[SERVER] Dekriptiran paket (%d bajtova) gurnut u TUN\n",
@@ -236,7 +298,7 @@ int main() {
 
       if (nread <= 0) {
         perror("Greska pri citanju iz TUN sucelja");
-        break;
+        continue;
       }
 
       if (nread >= sizeof(struct iphdr)) {
@@ -251,7 +313,7 @@ int main() {
 
           unsigned char ciphertext[nread + crypto_secretbox_MACBYTES];
           crypto_secretbox_easy(ciphertext, (unsigned char *)buffer, nread,
-                                nonce, shared_key);
+                                nonce, peer->tx);
 
           int final_len = sizeof(nonce) + sizeof(ciphertext);
           unsigned char final_packet[final_len];
@@ -269,6 +331,7 @@ int main() {
       }
     }
   }
+
   close(tun_fd);
   close(udp_fd);
   return 0;
